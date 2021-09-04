@@ -23,11 +23,11 @@ from collections import namedtuple
 
 
 # Install and import dependencies
-from .import_utils import import_dependencies, Dependency
-dependencies = [
-    Dependency('opencv-python', 'cv2', 'cv'),
-]
-import_dependencies(dependencies, globals())
+# from .import_utils import import_dependencies, Dependency
+# dependencies = [
+#     Dependency('opencv-python', 'cv2', 'cv'),
+# ]
+# import_dependencies(dependencies, globals())
 
 import numpy as np
 
@@ -99,12 +99,9 @@ class SeparateByColor(bpy.types.Operator):
         return True
 
     def execute(self, context):
-        print('execute()')
         paint_settings = get_paint_settings(context)
         palette_colors = np.array([c.color for c in paint_settings.palette.colors])
         n_colors = len(palette_colors)
-
-        print(palette_colors)
 
         # add alpha channal
         palette_colors = np.append(palette_colors, np.ones((n_colors, 1)), axis=1)
@@ -287,10 +284,6 @@ classes = [
 
 
 def register():
-    print('Register')
-
-    # bpy.types.Scene.separate_by_color_palette = PointerProperty(name='Palette', type=bpy.types.Palette)
-
     for cls in classes:
         bpy.utils.register_class(cls)
 
@@ -298,7 +291,6 @@ def register():
 
 
 def unregister():
-    print('Unregister')
     for cls in classes:
         bpy.utils.unregister_class(cls)
 
