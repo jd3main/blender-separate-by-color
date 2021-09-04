@@ -12,12 +12,27 @@ from bpy.props import (
     CollectionProperty,
 )
 
-from bl_ui.properties_paint_common import UnifiedPaintPanel as UnifiedPaintPanel
+from bl_ui.properties_paint_common import UnifiedPaintPanel
+
+import os
+import sys
+import ensurepip
+import subprocess
+import importlib
+from collections import namedtuple
+
+
+# Install and import dependencies
+from .import_utils import import_dependencies, Dependency
+dependencies = [
+    Dependency('opencv-python', 'cv2', 'cv'),
+]
+import_dependencies(dependencies, globals())
 
 import numpy as np
 
 from .sampling import sample_uv
-from .utils import color_dist
+from .utils import color_dist, get_ndarray
 
 
 bl_info = {
@@ -32,11 +47,23 @@ PALETTE_ID = 'separate_by_color_palette'
 BAKE_IMAGE_NAME = 'separate_by_color_tmp_bake'
 
 BAKE_TYPE_OPTIONS = ['NORMAL', 'COMBINED', 'DIFFUSE', 'GLOSSY', 'TRANSMISSION']
+BAKE_TYPE_ITEMS = [
+    ('NORMAL', 'Normal', '', 1),
+    ('COMBINED', 'Combined', '', 2),
+    ('DIFFUSE', 'Diffuse', '', 3),
+    ('GLOSSY', 'Glossy', '', 4),
+    ('TRANSMISSION', 'Transmission', '', 5),
+]
+
 PASS_use_pass_OPTIONS = {'AO', 'EMIT', 'DIRECT', 'INDIRECT', 'COLOR',
                          'DIFFUSE', 'GLOSSY', 'TRANSMISSION'}
 
 
-class OBJECT_OT_separate_by_color(bpy.types.Operator):
+def get_paint_settings(context):
+    return context.tool_settings.image_paint
+
+
+class SeparateByColor(bpy.types.Operator):
     '''
     Separate an object into multiple objects by color of each face.
     '''
@@ -44,7 +71,7 @@ class OBJECT_OT_separate_by_color(bpy.types.Operator):
     bl_label = 'Separate By Color'
     bl_options = {'REGISTER', 'UNDO'}
 
-    # bake_type: EnumProperty(items=BAKE_TYPE_OPTIONS, name='Bake Type')
+    bake_type: EnumProperty(items=BAKE_TYPE_ITEMS, name='Bake Type', default='COMBINED')
 
     # Lighting
     use_pass_direct: BoolProperty(name='Direct', default=False)
@@ -58,7 +85,7 @@ class OBJECT_OT_separate_by_color(bpy.types.Operator):
     use_pass_glossy: BoolProperty(name='Glossy', default=False)
     use_pass_transmission: BoolProperty(name='Transmission', default=False)
 
-    # Baking
+    # Texture settings
     bake_texture_width: IntProperty(name='Bake Texture Width', default=512)
     bake_texture_height: IntProperty(name='Bake Texture Height', default=512)
 
@@ -73,8 +100,11 @@ class OBJECT_OT_separate_by_color(bpy.types.Operator):
 
     def execute(self, context):
         print('execute()')
-        palette_colors = np.array([c.color for c in context.scene[PALETTE_ID].colors])
+        paint_settings = get_paint_settings(context)
+        palette_colors = np.array([c.color for c in paint_settings.palette.colors])
         n_colors = len(palette_colors)
+
+        print(palette_colors)
 
         # add alpha channal
         palette_colors = np.append(palette_colors, np.ones((n_colors, 1)), axis=1)
@@ -111,31 +141,33 @@ class OBJECT_OT_separate_by_color(bpy.types.Operator):
         if self.use_pass_transmission:
             pass_filter.add('TRANSMISSION')
 
-        bpy.ops.object.bake(pass_filter=pass_filter, use_clear=True)
+        bpy.ops.object.bake(type=self.bake_type, pass_filter=pass_filter, use_clear=True)
 
         bpy.ops.object.mode_set(mode='EDIT')
 
         bm = bmesh.from_edit_mesh(mesh)
         uv_layer = bm.loops.layers.uv.active
 
+        image_data = get_ndarray(image)
+
         for i in range(n_colors):
             bpy.ops.mesh.select_all(action='DESELECT')
             bm.faces.ensure_lookup_table()
 
-            face_colors = []
+            faces_colors = []
             for face in bm.faces:
                 center = Vector((0, 0))
                 for loop in face.loops:
                     uv = loop[uv_layer].uv
                     center += uv
                 center /= len(face.loops)
-                color = sample_uv(image, center)
-                face_colors.append(color)
-            face_colors = np.array(face_colors)
+                color = sample_uv(image_data, center)
+                faces_colors.append(color)
+            faces_colors = np.array(faces_colors)
 
             distances = np.zeros((len(bm.faces), n_colors))
             for j in range(n_colors):
-                distances[:, j] = color_dist(face_colors, palette_colors[j])
+                distances[:, j] = color_dist(faces_colors, palette_colors[j])
 
             nearest_color_index = np.argmin(distances, axis=1)
             for j, face in enumerate(bm.faces):
@@ -157,8 +189,8 @@ class OBJECT_OT_separate_by_color(bpy.types.Operator):
                 break
 
         # clear tmp data
-        mat.node_tree.nodes.remove(node)
-        bpy.data.images.remove(image)
+        # mat.node_tree.nodes.remove(node)
+        # bpy.data.images.remove(image)
         bpy.ops.object.mode_set(mode='OBJECT')
 
         return {'FINISHED'}
@@ -168,7 +200,11 @@ class OBJECT_OT_separate_by_color(bpy.types.Operator):
 
     @staticmethod
     def draw_parameters(layout, op_instance, context):
-        
+
+        r0 = layout.row()
+        r0.label(text='Bake Type')
+        r0.prop(op_instance, 'bake_type', text="")
+
         r1 = layout.row()
         r1c1 = r1.column()
         r1c1.label(text='Lighting')
@@ -211,7 +247,7 @@ class SeparateByColorPanel(bpy.types.Panel):
         layout = self.layout
 
         c1 = layout.column()
-        OBJECT_OT_separate_by_color.draw_parameters(c1, kmi.properties, context)
+        SeparateByColor.draw_parameters(c1, kmi.properties, context)
         op = c1.operator('object.separate_by_color', text='Separate by Color')
         op.use_pass_direct = kmi.properties.use_pass_direct
         op.use_pass_indirect = kmi.properties.use_pass_indirect
@@ -224,13 +260,16 @@ class SeparateByColorPanel(bpy.types.Panel):
 
         c2 = layout.column()
         c2.label(text='Palette')
-        paint_settings = context.tool_settings.image_paint
+        paint_settings = get_paint_settings(context)
         brush = paint_settings.brush
         UnifiedPaintPanel.prop_unified_color_picker(c2, context, brush, 'color', value_slider=True)
-        UnifiedPaintPanel.prop_unified_color(c2, context, brush, 'color', text="")
+        UnifiedPaintPanel.prop_unified_color(c2, context, brush, 'color', text='')
 
-        c2.template_ID(context.scene, PALETTE_ID, new="palette.new")
-        c2.template_palette(context.scene, PALETTE_ID, color=True)
+        # c2.template_ID(context.scene, PALETTE_ID, new='palette.new')
+        # c2.template_palette(context.scene, PALETTE_ID, color=True)
+        c2.template_ID(paint_settings, 'palette', new='palette.new')
+        if paint_settings.palette:
+            layout.template_palette(paint_settings, "palette", color=True)
 
 
 def set_keymap():
@@ -240,14 +279,17 @@ def set_keymap():
 
 
 classes = [
-    OBJECT_OT_separate_by_color,
+    SeparateByColor,
     SeparateByColorPanel,
 ]
 
 
+
+
 def register():
     print('Register')
-    bpy.types.Scene.separate_by_color_palette = PointerProperty(name='Palette', type=bpy.types.Palette)
+
+    # bpy.types.Scene.separate_by_color_palette = PointerProperty(name='Palette', type=bpy.types.Palette)
 
     for cls in classes:
         bpy.utils.register_class(cls)
